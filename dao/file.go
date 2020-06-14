@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime/multipart"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,8 +15,21 @@ import (
 )
 
 const (
-	FileExpireTime = 60
+	FileExpireTime = 60 * 60 * 24
 )
+
+func HaveFileByName(usrName string, filename string) (bool, int) {
+	var file model.UsrFile
+	var usr model.User
+	db := GetDB()
+	db.Where("name = ? ", usrName).First(&usr)
+	db.Where("file_name = ? and usr_id = ? ", filename, usr.ID).First(&file)
+	if file.ID == 0 {
+		return false, 0
+	}
+	return true, file.ID
+
+}
 
 func HaveFile(md5sum string) (bool, int) {
 	//redis Has it
@@ -34,7 +48,29 @@ func HaveFile(md5sum string) (bool, int) {
 		return false, 0
 	}
 	redisClient.Do("Set", md5sum, file.ID)
+	redisClient.Do("Expire", md5sum, FileExpireTime)
 	return true, int(file.ID)
+
+}
+
+func HaveTmpFile(md5sum string) (bool, string) {
+	redisClient := GetRedis()
+	db := GetDB()
+	defer redisClient.Close()
+	exists, _ := redis.Int(redisClient.Do("Exists", md5sum))
+	redisClient.Do("Expire", md5sum, FileExpireTime)
+	if exists == 1 {
+		location, _ := redis.String(redisClient.Do("Get", md5sum))
+		return true, location
+	}
+	var file model.TmpFile
+	db.Where("md5sum = ?", md5sum).First(&file)
+	if file.ID == 0 {
+		return false, ""
+	}
+	redisClient.Do("Set", md5sum, file.Location)
+	redisClient.Do("Expire", md5sum, FileExpireTime)
+	return true, file.Location
 
 }
 
@@ -116,4 +152,24 @@ func FastUpload(md5sum string, fileName string, usrName string) bool {
 	}
 	panic(fmt.Sprintf("[fast Upload] file should be saved and only link it with usr,but file not be saved"))
 
+}
+
+func FastTmpUpload(md5sum string, fileName string, usrName string, fragment int) bool {
+	exists, location := HaveTmpFile(md5sum)
+	redisClient := GetRedis()
+	if exists {
+		for {
+			len, _ := redis.Int(redisClient.Do("LLEN", usrName+fileName))
+			if len == fragment {
+				redisClient.Do("LPUSH", usrName+fileName, filepath.Base(location))
+				redisClient.Do("Expire", usrName+fileName)
+				redisClient.Close()
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		return true
+
+	}
+	panic(fmt.Sprintf("[fast Tmp Upload] file should be saved and only link it with usr,but file not be saved"))
 }

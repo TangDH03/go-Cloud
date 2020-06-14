@@ -78,6 +78,50 @@ func (master *Master) Send(result chan bool, job interface{}) {
 			fmt.Fprintln(gin.DefaultWriter, "master send reply to caller")
 			result <- (exist && value == Success)
 		}
+	case UploadBigJob:
+
+		var waitg sync.WaitGroup
+		master.mu.Lock()
+		wg, ok := taskWaitGroup.Load(job.(UploadBigJob).Md5sum)
+		if !ok {
+			taskWaitGroup.Store(job.(UploadBigJob), &waitg)
+			waitg.Add(1)
+			master.mu.Unlock()
+			success := master.sendBigUpload(job.(UploadBigJob), &waitg)
+			waitg.Wait()
+
+			value, exist := uploadTask.Load(job.(UploadBigJob).Md5sum)
+			fmt.Fprintln(gin.DefaultWriter,
+				fmt.Sprintf("determine recover or not value: %v exist: %v", value, exist))
+
+			if !success && exist && value == Success { //recover task
+
+				result <- dao.FastTmpUpload(job.(UploadBigJob).Md5sum,
+					job.(UploadBigJob).File.Filename,
+					job.(UploadBigJob).UsrName, job.(UploadBigJob).Fragment)
+				fmt.Fprintln(gin.DefaultWriter, "master send reply to caller")
+				//result <- true
+				return
+			}
+
+			fmt.Fprintln(gin.DefaultWriter, "master send reply to caller")
+			result <- (exist && value == Success)
+		} else {
+			wg.(*sync.WaitGroup).Add(1)
+			master.mu.Unlock()
+			success := master.sendBigUpload(job.(UploadBigJob), wg.(*sync.WaitGroup))
+			wg.(*sync.WaitGroup).Wait()
+			value, exist := uploadTask.Load(job.(UploadBigJob).Md5sum)
+			if !success && exist && value == Success { //recover task
+				result <- dao.FastTmpUpload(job.(UploadBigJob).Md5sum,
+					job.(UploadBigJob).File.Filename,
+					job.(UploadBigJob).UsrName, job.(UploadBigJob).Fragment)
+				fmt.Fprintln(gin.DefaultWriter, "master send reply to caller")
+				return
+			}
+			fmt.Fprintln(gin.DefaultWriter, "master send reply to caller")
+			result <- (exist && value == Success)
+		}
 	default:
 		result <- true
 
@@ -174,6 +218,71 @@ WaitComplete:
 		master.mu.Unlock()
 		dao.FastUpload(job.Md5sum,
 			job.File.Filename, job.UsrName)
+		return true
+	}
+	uploadTask.Store(job.Md5sum, IsWriting)
+	master.mu.Unlock()
+	worker := master.pickUpIdle()
+	worker.Jobs <- job
+	reply := <-worker.Reply
+	fmt.Fprintln(gin.DefaultWriter, fmt.Sprintf("worker complete reply is %v", reply))
+	if reply.(bool) {
+		master.mu.Lock()
+		uploadTask.Store(job.Md5sum, Success)
+		master.setIdle(worker)
+		master.mu.Unlock()
+		return true
+	} else {
+		master.mu.Lock()
+		uploadTask.Store(job.Md5sum, WriteFail)
+		master.setIdle(worker)
+		master.mu.Unlock()
+		return false
+	}
+
+}
+func (master *Master) sendBigUpload(job UploadBigJob, wg *sync.WaitGroup) bool {
+	//just a tricky
+	var code int
+	defer wg.Done()
+WaitComplete:
+	for {
+		master.mu.Lock()
+		value, ok := uploadTask.Load(job.Md5sum)
+		master.mu.Unlock()
+		if ok {
+			code = value.(int)
+		}
+		if ok && code == IsWriting {
+			time.Sleep(waitTime)
+		} else {
+			break
+		}
+	}
+	if code == Success {
+		dao.FastUpload(job.Md5sum,
+			job.File.Filename, job.UsrName)
+		return true
+	} else if code == WriteFail {
+		master.mu.Lock()
+		value, _ := uploadTask.Load(job.Md5sum)
+		if value == IsWriting {
+			master.mu.Unlock()
+			goto WaitComplete
+		}
+		uploadTask.Store(job.Md5sum, IsWriting)
+		master.mu.Unlock()
+	}
+	master.mu.Lock()
+	value, ok := uploadTask.Load(job.Md5sum)
+	if ok && value.(int) == IsWriting {
+		master.mu.Unlock()
+		goto WaitComplete
+	}
+	if ok && value.(int) == Success {
+		master.mu.Unlock()
+		dao.FastTmpUpload(job.Md5sum,
+			job.File.Filename, job.UsrName, job.Fragment)
 		return true
 	}
 	uploadTask.Store(job.Md5sum, IsWriting)

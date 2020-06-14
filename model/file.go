@@ -8,3 +8,9 @@ type File struct {
 	Location   string
 	CreateTime time.Time
 }
+
+type TmpFile struct {
+	ID       int `gorm:"AUTO_INCREMENT;primary_key"`
+	Md5sum   string
+	Location string
+}

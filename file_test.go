@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"mime/multipart"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,8 @@ import (
 )
 
 const testfiledir = "./testfile/upload/"
+const testBigfiledir = "./testfile/BigUpload/"
+const filechunk = 1024 * 1024 * 10
 
 func TestUpload(t *testing.T) {
 	files, _ := ioutil.ReadDir("./testfile/upload")
@@ -54,6 +58,84 @@ func TestUpload(t *testing.T) {
 	fmt.Fprintln(gin.DefaultWriter, "not finish")
 	wg.Wait()
 	//assert.Equal(t, false, true)
+}
+func TestBigUpload(t *testing.T) {
+	files, _ := ioutil.ReadDir("./testfile/BigUpload")
+	router := GetRouter()
+	file, err := os.Open("./testfile/notRegister.txt")
+	assert.Equal(t, nil, err)
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	result := make(chan bool, 10)
+	var number int
+	for scanner.Scan() {
+		number += 1
+
+		usr_password := scanner.Text()
+		u_p := strings.Split(usr_password, " ")
+		go login(router, u_p[0], u_p[1], result)
+		if number >= 105 {
+			break
+		}
+	}
+	for i := 0; i < number; i++ {
+		value := <-result
+		assert.Equal(t, true, value)
+	}
+	number = 0
+	var wg sync.WaitGroup
+	Loginmap.Range(func(key, value interface{}) bool {
+		wg.Add(1)
+		number++
+		go uploadBig(router, key.(string), &wg, files, result)
+		return true
+	})
+	fmt.Fprintln(gin.DefaultWriter, "not finish")
+	wg.Wait()
+
+	for i := 0; i < number; i++ {
+		assert.Equal(t, true, <-result)
+	}
+
+}
+func uploadBig(router *gin.Engine, token string, wg *sync.WaitGroup, files []os.FileInfo, result chan bool) {
+	defer wg.Done()
+	w := httptest.NewRecorder()
+	re := true
+	//Open file
+	for i := 0; i < 3; i++ {
+		file, _ := os.Open(testBigfiledir + files[rand.Intn(len(files))].Name())
+		defer file.Close()
+		info, _ := file.Stat()
+		filesize := info.Size()
+		blocks := uint64(math.Ceil(float64(filesize) / float64(filechunk)))
+		allhash := md5.New()
+		for j := uint64(0); j < blocks; j++ {
+			hash := md5.New()
+			blocksize := int(math.Min(filechunk, float64(filesize-int64(j*filechunk))))
+			buf := make([]byte, blocksize)
+			file.Read(buf)
+			io.WriteString(hash, string(buf))
+			io.WriteString(allhash, string(buf))
+			body := &bytes.Buffer{}
+			writer := multipart.NewWriter(body)
+			//add file,token,md5sum
+			part, _ := writer.CreateFormFile("file", filepath.Base(file.Name()))
+			io.Copy(part, bytes.NewReader(buf))
+			writer.WriteField("token", token)
+			writer.WriteField("md5sum", fmt.Sprintf("%x", (hash.Sum(nil)[:])))
+			writer.WriteField("fragment", strconv.Itoa(int(j)))
+			writer.WriteField("blocks", strconv.Itoa(int(blocks)))
+			writer.Close()
+
+			req := httptest.NewRequest("POST", "/file/upload", body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			router.ServeHTTP(w, req)
+		}
+
+	}
+	result <- re
+
 }
 
 func TestDownload(t *testing.T) {
