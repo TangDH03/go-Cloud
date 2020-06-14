@@ -19,12 +19,9 @@
 - [x] Download
   Pass:ok_hand:
 
-- [ ] Big File Upload
-
-- [ ] Resume
-
-- [ ] Query
-
-- [ ] Delete
+- [x] Big File Upload
+ Pass:ok_hand:
+- [x] Resume
+ Pass:ok_hand:
 
 May be more features :smile:
